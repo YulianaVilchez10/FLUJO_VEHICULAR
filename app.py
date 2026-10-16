@@ -3,6 +3,13 @@ Instalación: pip install -r requirements.txt
 Ejecución: streamlit run app.py
 """
 import re
+import smtplib
+import hmac
+import io
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+from email.message import EmailMessage
+from email.utils import parseaddr
 import unicodedata
 import pandas as pd
 import plotly.express as px
@@ -67,8 +74,53 @@ def grafico_barras(tabla, x, y="VEH_TOTAL", horizontal=False):
     fig.update_layout(template="plotly_white", coloraxis_showscale=False, margin=dict(l=10,r=10,t=15,b=10), height=390)
     return fig
 
+
+# SEGURIDAD: este módulo está protegido con una contraseña administrativa.
+# La clave SERVICE_ROLE solo se usa en el servidor, nunca en el navegador.
+def email_valido(valor):
+    nombre, direccion = parseaddr(valor.strip())
+    return not nombre and direccion == valor.strip() and re.fullmatch(r"[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+", direccion) is not None
+
+
+def enviar_correo(destinatario, asunto, cuerpo, csv_bytes=None):
+    remitente = st.secrets["GMAIL_USER"]
+    clave = st.secrets["GMAIL_APP_PASSWORD"].replace(" ", "")
+    msg = EmailMessage()
+    msg["From"] = remitente
+    msg["To"] = destinatario
+    msg["Subject"] = asunto
+    msg.set_content(cuerpo)
+    if csv_bytes:
+        msg.add_attachment(csv_bytes, maintype="text", subtype="csv", filename="reporte_flujo_vehicular.csv")
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=25) as smtp:
+        smtp.login(remitente, clave)
+        smtp.send_message(msg)
+
+
+def cliente_correos():
+    # Necesita SUPABASE_SERVICE_ROLE_KEY, solo en Secrets de Streamlit.
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_SERVICE_ROLE_KEY"])
+
+
+def generar_informe(df):
+    total = int(df["VEH_TOTAL"].sum())
+    ligeros = int(df["VEH_LIGEROS_TOTAL"].sum())
+    pesados = int(df["VEH_PESADOS_TOTAL"].sum())
+    tabla = agrupar(df, "DEPARTAMENTO")
+    mayor = tabla.iloc[0]["DEPARTAMENTO"] if not tabla.empty else "Sin datos"
+    cuerpo = ("INFORME DE FLUJO VEHICULAR - PERÚ\n\n"
+              f"Registros analizados: {fmt(len(df))}\n"
+              f"Vehículos totales: {fmt(total)}\n"
+              f"Vehículos ligeros: {fmt(ligeros)}\n"
+              f"Vehículos pesados: {fmt(pesados)}\n"
+              f"Departamento con mayor flujo registrado: {mayor}\n\n"
+              "Cuadro comparativo por departamento:\n"
+              + tabla.to_string(index=False) +
+              "\n\nNota: cifras calculadas a partir de los filtros y registros disponibles al preparar este informe.")
+    return cuerpo, tabla.to_csv(index=False).encode("utf-8-sig")
+
 st.sidebar.title("🚗 Flujo Vehicular")
-seccion = st.sidebar.radio("Navegación", ["📊 Dashboard", "📋 Registros", "📈 Análisis estadístico", "🤖 Asistente IA"])
+seccion = st.sidebar.radio("Navegación", ["📊 Dashboard", "📋 Registros", "📈 Análisis estadístico", "🤖 Asistente IA", "📧 Agente 2 · Correos"])
 st.sidebar.divider()
 if st.sidebar.button("🔄 Actualizar datos"):
     cargar_datos.clear()
@@ -147,7 +199,7 @@ elif seccion == "📈 Análisis estadístico":
     st.dataframe(tabla.rename(columns={dimension:"Categoría", variable:"Vehículos"}), use_container_width=True, hide_index=True)
     st.download_button("⬇️ Descargar cuadro comparativo", tabla.to_csv(index=False).encode("utf-8-sig"), "comparacion.csv", "text/csv")
 
-else:
+elif seccion == "🤖 Asistente IA":
     st.subheader("🤖 Asistente IA con gráficos y cuadros comparativos")
     st.caption("El sistema calcula cifras con los datos de Supabase; Groq explica los resultados. Los filtros laterales también se aplican aquí.")
     if "historial_flujo" not in st.session_state:
@@ -222,3 +274,86 @@ else:
         })
         st.rerun()
     st.caption("Nota: las preguntas abiertas se interpretan mediante reglas sencillas; para análisis complejos se pueden añadir controles y consultas específicas.")
+
+
+elif seccion == "📧 Agente 2 · Correos":
+    st.subheader("📧 Agente 2 — Envío de informes")
+    st.caption("Envía reportes ahora o deja un envío programado. Los informes programados son una instantánea de los datos filtrados al crearlos.")
+    if "EMAIL_ADMIN_PASSWORD" not in st.secrets:
+        st.error("Configura EMAIL_ADMIN_PASSWORD en Secrets antes de habilitar el agente de correo.")
+        st.stop()
+    clave_introducida = st.text_input("Contraseña de administración del Agente 2", type="password")
+    if not hmac.compare_digest(clave_introducida, str(st.secrets["EMAIL_ADMIN_PASSWORD"])) or not clave_introducida:
+        st.info("Ingresa la contraseña administrativa para ver y usar el agente de correos.")
+        st.stop()
+    st.success("Acceso autorizado al Agente 2")
+    destinatario = st.text_input("Correo destinatario", placeholder="persona@gmail.com").strip()
+    asunto = st.text_input("Asunto", "Informe de flujo vehicular del Perú")
+    cuerpo_sugerido, csv_reporte = generar_informe(filtrado)
+    contenido = st.text_area("Vista previa del informe", value=cuerpo_sugerido, height=290)
+    adjuntar = st.checkbox("Adjuntar cuadro comparativo CSV", value=True)
+    modo = st.radio("Tipo de envío", ["Enviar ahora", "Programar para después", "Envío recurrente"], horizontal=True)
+    tz_lima = ZoneInfo("America/Lima")
+    ahora_lima = datetime.now(tz_lima)
+    fecha = None
+    hora = None
+    frecuencia = "una_vez"
+    if modo != "Enviar ahora":
+        col_f, col_h = st.columns(2)
+        with col_f:
+            fecha = st.date_input("Fecha del primer envío (Perú)", value=ahora_lima.date() + timedelta(days=1), min_value=ahora_lima.date())
+        with col_h:
+            hora = st.time_input("Hora del envío (Perú)", value=datetime.strptime("09:00", "%H:%M").time())
+        if modo == "Envío recurrente":
+            frecuencia = st.selectbox("Frecuencia", ["diaria", "semanal", "mensual"])
+        st.caption("Los envíos programados se procesan mediante GitHub Actions, aproximadamente cada 5 minutos; no garantizan exactitud al minuto.")
+    if st.button("📨 Enviar correo" if modo == "Enviar ahora" else "🗓️ Guardar programación", type="primary"):
+        if not email_valido(destinatario):
+            st.error("Escribe una sola dirección de correo válida.")
+        elif not asunto.strip() or not contenido.strip():
+            st.error("El asunto y el contenido no pueden estar vacíos.")
+        elif modo == "Enviar ahora":
+            try:
+                enviar_correo(destinatario, asunto, contenido, csv_reporte if adjuntar else None)
+                st.success("Correo enviado. Revisa también la bandeja de spam del destinatario.")
+            except Exception as exc:
+                st.error(f"No se pudo enviar: {type(exc).__name__}: {exc}")
+        else:
+            fecha_local = datetime.combine(fecha, hora, tzinfo=tz_lima)
+            if fecha_local <= ahora_lima:
+                st.error("Selecciona una fecha y hora futuras.")
+            elif "SUPABASE_SERVICE_ROLE_KEY" not in st.secrets:
+                st.error("Para programar envíos, configura SUPABASE_SERVICE_ROLE_KEY en los Secrets de Streamlit y crea la tabla email_jobs.sql.")
+            else:
+                try:
+                    payload = {
+                        "recipient": destinatario,
+                        "subject": asunto.strip(),
+                        "body": contenido,
+                        "csv_content": csv_reporte.decode("utf-8-sig") if adjuntar else None,
+                        "scheduled_at": fecha_local.astimezone(timezone.utc).isoformat(),
+                        "frequency": frecuencia,
+                        "status": "pending",
+                    }
+                    cliente_correos().table("email_jobs").insert(payload).execute()
+                    st.success("Programación guardada. Se enviará cuando el programador externo esté activo.")
+                except Exception as exc:
+                    st.error(f"No se pudo programar: {type(exc).__name__}: {exc}")
+    st.divider()
+    st.subheader("📋 Envíos programados")
+    if "SUPABASE_SERVICE_ROLE_KEY" not in st.secrets:
+        st.info("Agrega SUPABASE_SERVICE_ROLE_KEY para consultar y cancelar programaciones.")
+    else:
+        try:
+            trabajos = cliente_correos().table("email_jobs").select("id,recipient,subject,scheduled_at,frequency,status,sent_count,last_sent_at,last_error").order("scheduled_at", desc=True).limit(50).execute().data or []
+            st.dataframe(pd.DataFrame(trabajos), use_container_width=True, hide_index=True)
+            pendientes = [j for j in trabajos if j["status"] == "pending"]
+            if pendientes:
+                opciones = {f'{j["recipient"]} | {j["scheduled_at"]} | {j["id"]}': j["id"] for j in pendientes}
+                cancelar = st.selectbox("Cancelar programación pendiente", list(opciones))
+                if st.button("Cancelar programación seleccionada"):
+                    cliente_correos().table("email_jobs").update({"status": "cancelled"}).eq("id", opciones[cancelar]).eq("status", "pending").execute()
+                    st.success("Solicitud de cancelación guardada. Si el envío ya está siendo procesado, podría completarse.")
+                    st.rerun()
+        except Exception as exc:
+            st.warning(f"No se pudo leer el historial: {type(exc).__name__}: {exc}")
