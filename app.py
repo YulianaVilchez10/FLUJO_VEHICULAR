@@ -154,7 +154,7 @@ def email_valido(valor):
 
     nombre, direccion = parseaddr(valor.strip())
 
-    return not nombre and direccion == valor.strip() and re.fullmatch(r"[^\s@,;<>]+@[^\s@,;<>]+**\\.**[^\s@,;<>]+", direccion) is not None
+    return not nombre and direccion == valor.strip() and re.fullmatch(r"[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+", direccion) is not None
 
 def enviar_correo(destinatario, asunto, cuerpo, csv_bytes=None):
 
