@@ -13,6 +13,18 @@ import smtplib
 import hmac
 
 import io
+import base64
+import html
+import textwrap
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, KeepTogether
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import cm
 
 from datetime import datetime, timedelta, timezone
 
@@ -156,7 +168,7 @@ def email_valido(valor):
 
     return not nombre and direccion == valor.strip() and re.fullmatch(r"[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+", direccion) is not None
 
-def enviar_correo(destinatario, asunto, cuerpo, csv_bytes=None):
+def enviar_correo(destinatario, asunto, cuerpo, csv_bytes=None, pdf_bytes=None):
 
     remitente = st.secrets["GMAIL_USER"]
 
@@ -175,6 +187,9 @@ def enviar_correo(destinatario, asunto, cuerpo, csv_bytes=None):
     if csv_bytes:
 
         msg.add_attachment(csv_bytes, maintype="text", subtype="csv", filename="reporte_flujo_vehicular.csv")
+
+    if pdf_bytes:
+        msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename="informe_agente_ia.pdf")
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=25) as smtp:
 
@@ -219,6 +234,79 @@ def generar_informe(df):
               "\n\nNota: cifras calculadas a partir de los filtros y registros disponibles al preparar este informe.")
 
     return cuerpo, tabla.to_csv(index=False).encode("utf-8-sig")
+
+
+def crear_pdf_ia(entrada, titulo, descripcion):
+    """PDF con pregunta, respuesta de Groq, tabla real y gráfico calculado."""
+    salida = io.BytesIO()
+    doc = SimpleDocTemplate(salida, pagesize=A4, rightMargin=1.8*cm, leftMargin=1.8*cm,
+                            topMargin=1.8*cm, bottomMargin=1.8*cm)
+    estilos = getSampleStyleSheet()
+    estilos.add(ParagraphStyle(name="TituloFlujo", parent=estilos["Title"], fontSize=18,
+                               leading=22, textColor=colors.HexColor("#143b65"), spaceAfter=14))
+    estilos.add(ParagraphStyle(name="TextoFlujo", parent=estilos["BodyText"], fontSize=10,
+                               leading=15, spaceAfter=10))
+    estilos.add(ParagraphStyle(name="CabFlujo", parent=estilos["Heading2"], fontSize=12,
+                               textColor=colors.HexColor("#1763a7"), spaceBefore=12))
+    story = [Paragraph(html.escape(titulo), estilos["TituloFlujo"]),
+             Paragraph("Sistema Inteligente de Flujo Vehicular · Perú", estilos["TextoFlujo"]),
+             Paragraph("Fecha de generación: " + datetime.now(ZoneInfo("America/Lima")).strftime("%d/%m/%Y %H:%M") + " (Perú)", estilos["TextoFlujo"]),
+             Paragraph("¿De qué trata este informe?", estilos["CabFlujo"]),
+             Paragraph(html.escape(descripcion).replace("\n", "<br/>"), estilos["TextoFlujo"]),
+             Paragraph("Pregunta analizada", estilos["CabFlujo"]),
+             Paragraph(html.escape(entrada["pregunta"]), estilos["TextoFlujo"]),
+             Paragraph("Análisis y descripción de resultados", estilos["CabFlujo"])]
+    for parrafo in entrada["respuesta"].split("\n"):
+        if parrafo.strip():
+            story.append(Paragraph(html.escape(parrafo).replace("**", ""), estilos["TextoFlujo"]))
+    tabla = entrada.get("tabla")
+    if tabla is not None and not tabla.empty:
+        story.append(Paragraph("Cuadro comparativo", estilos["CabFlujo"]))
+        columnas = list(tabla.columns)
+        celdas = [[Paragraph(html.escape(str(c)), estilos["TextoFlujo"]) for c in columnas]]
+        for _, fila in tabla.head(12).iterrows():
+            celdas.append([Paragraph(html.escape(fmt(v) if isinstance(v, (int, float)) else str(v)), estilos["TextoFlujo"]) for v in fila])
+        ancho = (A4[0] - 3.6*cm) / len(columnas)
+        cuadro = Table(celdas, colWidths=[ancho]*len(columnas), repeatRows=1, hAlign="LEFT")
+        cuadro.setStyle(TableStyle([("BACKGROUND", (0,0),(-1,0),colors.HexColor("#e7f0fa")),
+                                     ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#d8e4ef")),
+                                     ("VALIGN",(0,0),(-1,-1),"TOP"),
+                                     ("LEFTPADDING",(0,0),(-1,-1),7), ("RIGHTPADDING",(0,0),(-1,-1),7)]))
+        story.append(cuadro)
+        story.append(Paragraph("Gráfico de resultados", estilos["CabFlujo"]))
+        fig, ax = plt.subplots(figsize=(8, 4.2))
+        categorias = tabla[entrada["dimension"]].astype(str).tolist()
+        valores = pd.to_numeric(tabla[entrada["metrica"]], errors="coerce").fillna(0).tolist()
+        if entrada["horizontal"]:
+            ax.barh(categorias[::-1], valores[::-1], color="#1763a7")
+            ax.set_xlabel("Cantidad de vehículos")
+        else:
+            ax.bar(categorias, valores, color="#1763a7")
+            ax.tick_params(axis="x", labelrotation=35)
+            ax.set_ylabel("Cantidad de vehículos")
+        ax.grid(axis="x" if entrada["horizontal"] else "y", alpha=.2)
+        fig.tight_layout()
+        imagen = io.BytesIO()
+        fig.savefig(imagen, format="png", dpi=140, bbox_inches="tight")
+        plt.close(fig)
+        imagen.seek(0)
+        story.append(Image(imagen, width=16*cm, height=8.4*cm, kind="proportional"))
+    story.append(Spacer(1, .4*cm))
+    story.append(Paragraph("Fuente: registros consultados en Supabase y procesados por el Agente 1. "
+                           "La interpretación de IA se basa en los resultados calculados.", estilos["TextoFlujo"]))
+    doc.build(story)
+    return salida.getvalue()
+
+
+def texto_informe_ia(entrada, titulo, descripcion):
+    partes = [titulo, "", "¿DE QUÉ TRATA ESTE INFORME?", descripcion, "",
+              "PREGUNTA ANALIZADA", entrada["pregunta"], "",
+              "ANÁLISIS E INTERPRETACIÓN", entrada["respuesta"]]
+    tabla = entrada.get("tabla")
+    if tabla is not None and not tabla.empty:
+        partes += ["", "CUADRO COMPARATIVO", tabla.to_string(index=False)]
+    partes += ["", "Fuente: Supabase; análisis generado por el Agente 1."]
+    return "\n".join(partes)
 
 st.sidebar.markdown('<div class="sidebar-brand"><strong>🚗 Tránsito Inteligente</strong><small>Analítica vehicular · Perú</small></div>', unsafe_allow_html=True)
 st.sidebar.caption("MENÚ PRINCIPAL")
@@ -534,15 +622,43 @@ elif seccion == "📧 Agente 2 · Correos":
 
     st.info("Acceso directo al centro de correos. Solo habilítalo si la aplicación tiene acceso restringido.")
 
+    st.markdown("#### 1. Elegir el origen del informe")
+    historial_ia = st.session_state.get("historial_flujo", [])
+    opciones_origen = ["Informe general de los filtros actuales"]
+    if historial_ia:
+        opciones_origen.insert(0, "Respuesta del Agente 1 (con cuadro y gráfico en PDF)")
+    origen = st.radio("Origen del reporte", opciones_origen, horizontal=False)
+    entrada_ia = None
+    pdf_reporte = None
+    if origen.startswith("Respuesta del Agente 1"):
+        opciones = list(range(len(historial_ia)-1, -1, -1))
+        indice = st.selectbox("Selecciona la pregunta que deseas enviar", opciones,
+                              format_func=lambda i: f"Pregunta {i+1}: {historial_ia[i]['pregunta'][:100]}")
+        entrada_ia = historial_ia[indice]
+        titulo = st.text_input("Título del informe", value="Informe de análisis: " + entrada_ia["pregunta"][:75])
+        descripcion = st.text_area("¿De qué trata el informe?", value="Análisis del flujo vehicular basado en la consulta: " + entrada_ia["pregunta"], height=95)
+        cuerpo_sugerido = texto_informe_ia(entrada_ia, titulo, descripcion)
+        tabla_ia = entrada_ia.get("tabla")
+        csv_reporte = tabla_ia.to_csv(index=False).encode("utf-8-sig") if tabla_ia is not None else None
+        st.info("Se enviará la respuesta exacta del Agente 1, su cuadro comparativo y un PDF con el gráfico. No es necesario repetir la pregunta.")
+        if tabla_ia is not None and not tabla_ia.empty:
+            st.plotly_chart(grafico_barras(tabla_ia, entrada_ia["dimension"], entrada_ia["metrica"], entrada_ia["horizontal"]), use_container_width=True)
+            st.dataframe(tabla_ia, use_container_width=True, hide_index=True)
+        else:
+            st.warning("Esta respuesta no contiene datos tabulares para dibujar un gráfico.")
+    else:
+        titulo = st.text_input("Título del informe", value="Informe general de flujo vehicular del Perú")
+        descripcion = st.text_area("¿De qué trata el informe?", value="Resumen de vehículos ligeros, pesados y flujo por departamento, según los filtros seleccionados.", height=95)
+        cuerpo_general, csv_reporte = generar_informe(filtrado)
+        cuerpo_sugerido = titulo + "\n\n" + descripcion + "\n\n" + cuerpo_general
+
+    st.markdown("#### 2. Destinatario y contenido")
     destinatario = st.text_input("Correo destinatario", placeholder="persona@gmail.com").strip()
-
-    asunto = st.text_input("Asunto", "Informe de flujo vehicular del Perú")
-
-    cuerpo_sugerido, csv_reporte = generar_informe(filtrado)
-
-    contenido = st.text_area("Vista previa del informe", value=cuerpo_sugerido, height=290)
-
-    adjuntar = st.checkbox("Adjuntar cuadro comparativo CSV", value=True)
+    asunto = st.text_input("Asunto", value=titulo)
+    contenido = st.text_area("Vista previa del texto del correo", value=cuerpo_sugerido, height=280)
+    adjuntar = st.checkbox("Adjuntar cuadro comparativo CSV (si existe)", value=True)
+    if entrada_ia is not None:
+        st.caption("El PDF con la descripción, respuesta, tabla y gráfico se adjunta automáticamente.")
 
     st.markdown("#### Modalidad de envío")
     modo = st.radio("Tipo de envío", ["Enviar ahora", "Programar para después", "Envío recurrente"], horizontal=True, label_visibility="collapsed")
@@ -594,8 +710,8 @@ elif seccion == "📧 Agente 2 · Correos":
         elif modo == "Enviar ahora":
 
             try:
-
-                enviar_correo(destinatario, asunto, contenido, csv_reporte if adjuntar else None)
+                pdf_reporte = crear_pdf_ia(entrada_ia, titulo, descripcion) if entrada_ia is not None else None
+                enviar_correo(destinatario, asunto, contenido, csv_reporte if adjuntar else None, pdf_reporte)
 
                 st.success("Correo enviado. Revisa también la bandeja de spam del destinatario.")
 
@@ -619,6 +735,7 @@ elif seccion == "📧 Agente 2 · Correos":
 
                 try:
 
+                    pdf_reporte = crear_pdf_ia(entrada_ia, titulo, descripcion) if entrada_ia is not None else None
                     payload = {
 
                         "recipient": destinatario,
@@ -627,7 +744,7 @@ elif seccion == "📧 Agente 2 · Correos":
 
                         "body": contenido,
 
-                        "csv_content": csv_reporte.decode("utf-8-sig") if adjuntar else None,
+                        "csv_content": ("PDF_BASE64:" + base64.b64encode(pdf_reporte).decode("ascii")) if pdf_reporte else (csv_reporte.decode("utf-8-sig") if adjuntar and csv_reporte else None),
 
                         "scheduled_at": fecha_local.astimezone(timezone.utc).isoformat(),
 
