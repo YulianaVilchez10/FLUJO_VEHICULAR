@@ -146,7 +146,7 @@ def grafico_barras(tabla, x, y="VEH_TOTAL", horizontal=False):
 
     return fig
 
-# SEGURIDAD: este módulo está protegido con una contraseña administrativa.
+# SEGURIDAD: este módulo NO requiere contraseña; restringe el acceso a la aplicación antes de publicarla.
 
 # La clave SERVICE_ROLE solo se usa en el servidor, nunca en el navegador.
 
@@ -532,21 +532,7 @@ elif seccion == "📧 Agente 2 · Correos":
 
     st.caption("Envía reportes ahora o deja un envío programado. Los informes programados son una instantánea de los datos filtrados al crearlos.")
 
-    if "EMAIL_ADMIN_PASSWORD" not in st.secrets:
-
-        st.error("Configura EMAIL_ADMIN_PASSWORD en Secrets antes de habilitar el agente de correo.")
-
-        st.stop()
-
-    clave_introducida = st.text_input("Contraseña de administración del Agente 2", type="password")
-
-    if not hmac.compare_digest(clave_introducida, str(st.secrets["EMAIL_ADMIN_PASSWORD"])) or not clave_introducida:
-
-        st.info("Ingresa la contraseña administrativa para ver y usar el agente de correos.")
-
-        st.stop()
-
-    st.success("Acceso autorizado al Agente 2")
+    st.info("Acceso directo al centro de correos. Solo habilítalo si la aplicación tiene acceso restringido.")
 
     destinatario = st.text_input("Correo destinatario", placeholder="persona@gmail.com").strip()
 
